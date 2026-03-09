@@ -1,8 +1,14 @@
 import { registerRootComponent } from 'expo';
+import { NativeEventEmitter } from 'react-native';
 
-import App from './App';
+// ✅ 1. Apply Polyfill FIRST (Fixes the TTS/Mic crash)
+if (!(NativeEventEmitter.prototype as any).removeListener) {
+  (NativeEventEmitter.prototype as any).removeListener = function (eventType: string) {
+    console.log(`Polyfill caught removeListener: ${eventType}`);
+  };
+}
 
-// registerRootComponent calls AppRegistry.registerComponent('main', () => App);
-// It also ensures that whether you load the app in Expo Go or in a native build,
-// the environment is set up appropriately
+// ✅ 2. Load App SECOND (Prevents ES6 hoisting from loading audio modules too early)
+const App = require('./App').default;
+
 registerRootComponent(App);

@@ -1,108 +1,133 @@
-import React, { useEffect, useState } from 'react';
-import { StyleSheet, ActivityIndicator, View, Text } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { NavigationContainer } from '@react-navigation/native';
-import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import Tts from 'react-native-tts';
+import React, { useEffect, useState, useCallback } from "react";
+import { StyleSheet, ActivityIndicator, View, Text } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import {
+  NavigationContainer,
+  useNavigationContainerRef,
+} from "@react-navigation/native";
+import { createNativeStackNavigator } from "@react-navigation/native-stack";
+import Tts from "react-native-tts";
 
-import { requestDrishtiPermissions } from './src/core/permissions/PermissionManager';
-import HomeScreen from './src/features/home/HomeScreen';
-import CameraStream from './src/features/vision/CameraStream';
-import DebugScreen from './src/features/debug/DebugScreen';
+import { requestDrishtiPermissions } from "./src/core/permissions/PermissionManager";
+import HomeScreen from "./src/features/home/HomeScreen";
+import CameraStream from "./src/features/vision/CameraStream";
+import DebugScreen from "./src/features/debug/DebugScreen";
+// NOTE: We will create this in the next step!
+import ReaderScreen from "./src/features/reader/ReaderScreen";
 
-const Stack = createNativeStackNavigator();
+import { useVoiceNavigator } from "./src/core/navigation/useVoiceNavigator";
+import { useStore } from "./src/core/store/useStore";
+
+type RootStackParamList = {
+  Home: undefined;
+  Camera: undefined;
+  Reader: undefined;
+  Debug: undefined;
+};
+
+const Stack = createNativeStackNavigator<RootStackParamList>();
+
+const AppInner = () => {
+  const navRef = useNavigationContainerRef<RootStackParamList>();
+  const [currentRoute, setCurrentRoute] = useState("Home");
+
+  const navigate = useCallback(
+    (screen: keyof RootStackParamList) => {
+      navRef.navigate(screen as any);
+    },
+    [navRef],
+  );
+
+  const { handleNavAudio } = useVoiceNavigator({ currentRoute, navigate });
+
+  // ✅ Expose navigator globally for useStore
+  useEffect(() => {
+    (global as any).__drishtiNavHandler = handleNavAudio;
+  }, [handleNavAudio]);
+
+  return (
+    <NavigationContainer
+      ref={navRef}
+      onStateChange={() => {
+        const name = navRef.getCurrentRoute()?.name ?? "Home";
+        setCurrentRoute(name);
+      }}
+    >
+      <Stack.Navigator
+        screenOptions={{ headerShown: false }}
+        initialRouteName="Home"
+      >
+        <Stack.Screen name="Home" component={HomeScreen} />
+        <Stack.Screen name="Camera" component={CameraStream} />
+        <Stack.Screen name="Reader" component={ReaderScreen} />
+        <Stack.Screen name="Debug" component={DebugScreen} />
+      </Stack.Navigator>
+    </NavigationContainer>
+  );
+};
 
 const App = () => {
   const [hasPermissions, setHasPermissions] = useState<boolean | null>(null);
 
-  // 1. Permission Initialization
+  const { connect } = useStore();
+
   useEffect(() => {
     (async () => {
-      const status = await requestDrishtiPermissions();
-      setHasPermissions(status);
+      try {
+        // Renamed to permResult to avoid Hermes 'status' collision
+        const permResult = await requestDrishtiPermissions();
+        setHasPermissions(permResult);
+
+        // CONNECT TO BACKEND IMMEDIATELY IF PERMISSIONS GRANTED
+        if (permResult === true) {
+          connect();
+        }
+      } catch (error) {
+        console.error("Permission init error:", error);
+      }
     })();
-  }, []);
+  }, [connect]);
 
-  // 2. TTS Engine Initialization
   useEffect(() => {
-    Tts.setDefaultLanguage('en-IN');
+    Tts.setDefaultLanguage("en-IN");
     Tts.setDefaultRate(0.5);
-
     Tts.getInitStatus()
       .then(() => {
         console.log("🟢 TTS Engine Ready!");
-        Tts.speak("Drishti audio system is online.");
       })
-      .catch((err) => {
-        console.error("🔴 TTS Engine Failed: ", err);
-        if (err.code === 'no_engine') {
-          Tts.requestInstallEngine();
-        }
-      });
+      .catch(() => {});
   }, []);
 
-  // ── Loading state ──────────────────────────────────────────────────────────
-  if (hasPermissions === null) {
+  if (hasPermissions === null)
     return (
       <View style={styles.center}>
-        <ActivityIndicator size="large" color="#FFD700" />
-        <Text style={styles.text}>Initializing Drishti Sensors...</Text>
+        <ActivityIndicator size="large" color="#2D5A27" />
       </View>
     );
-  }
 
-  // ── Permissions denied ─────────────────────────────────────────────────────
-  if (hasPermissions === false) {
+  if (hasPermissions === false)
     return (
       <View style={styles.center}>
-        <Text style={styles.errorText}>Permissions Denied.</Text>
-        <Text style={styles.subText}>
-          Drishti needs Camera and Microphone to function.
-        </Text>
+        <Text style={styles.errorText}>Permissions Denied</Text>
       </View>
     );
-  }
 
-  // ── Main app ───────────────────────────────────────────────────────────────
   return (
     <SafeAreaView style={styles.container}>
-      <NavigationContainer>
-        <Stack.Navigator screenOptions={{ headerShown: false }}>
-          <Stack.Screen name="Home"   component={HomeScreen} />
-          <Stack.Screen name="Camera" component={CameraStream} />
-          <Stack.Screen name="Debug"  component={DebugScreen} />
-        </Stack.Navigator>
-      </NavigationContainer>
+      <AppInner />
     </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: 'black',
-  },
+  container: { flex: 1, backgroundColor: "black" },
   center: {
     flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#121212',
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "#F0F4EF",
   },
-  text: {
-    color: 'white',
-    marginTop: 10,
-  },
-  errorText: {
-    color: '#ff4444',
-    fontSize: 20,
-    fontWeight: 'bold',
-  },
-  subText: {
-    color: '#888',
-    textAlign: 'center',
-    marginTop: 10,
-    paddingHorizontal: 40,
-  },
+  errorText: { color: "#ff4444", fontSize: 20, fontWeight: "bold" },
 });
 
 export default App;
