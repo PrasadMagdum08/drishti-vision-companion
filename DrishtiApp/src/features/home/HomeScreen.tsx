@@ -33,10 +33,27 @@ const HomeScreen = () => {
               <Text style={{ fontSize: 40 }}>👁️</Text>
             </View>
             <Text style={styles.buttonText}>Open Vision</Text>
-            <Text style={styles.buttonSubtext}>Guardian • Voice • Navigation</Text>
+            <Text style={styles.buttonSubtext}>Guardian • Spatial Alerts</Text>
           </Pressable>
 
-          {/* Secondary — Debug Vision */}
+          {/* Secondary — Open Reader (Caregiver Friendly UI) */}
+          <Pressable
+            style={({ pressed }) => [
+              styles.readerButton,
+              pressed && styles.buttonPressed,
+            ]}
+            onPress={() => navigation.navigate('Reader')}
+          >
+            <View style={styles.iconCircleSmall}>
+              <Text style={{ fontSize: 28 }}>📖</Text>
+            </View>
+            <View style={styles.buttonTextGroup}>
+              <Text style={styles.readerButtonText}>Open Reader</Text>
+              <Text style={styles.readerButtonSubtext}>Continuous OCR • Summaries</Text>
+            </View>
+          </Pressable>
+
+          {/* Tertiary — Debug Vision */}
           <Pressable
             style={({ pressed }) => [
               styles.debugButton,
@@ -45,7 +62,7 @@ const HomeScreen = () => {
             onPress={() => navigation.navigate('Debug')}
           >
             <Text style={styles.debugIcon}>🔍</Text>
-            <View style={styles.debugTextGroup}>
+            <View style={styles.buttonTextGroup}>
               <Text style={styles.debugButtonText}>Debug Vision</Text>
               <Text style={styles.debugButtonSubtext}>
                 Bounding boxes • Tracking • Stats
@@ -57,7 +74,7 @@ const HomeScreen = () => {
 
         {/* 📊 Status Footer */}
         <View style={styles.footer}>
-          <Text style={styles.footerText}>Guardian v2 Active  •  RTX 4050 Linked</Text>
+          <Text style={styles.footerText}>Guardian v2.1 Active  •  RTX 4050 Linked</Text>
         </View>
 
       </View>
@@ -145,7 +162,44 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
 
-  // Secondary button — Debug Vision
+  // Secondary button — Open Reader (Blue/Indigo styling for caregivers)
+  readerButton: {
+    backgroundColor: '#005bb5', // Deep accessible blue
+    width: '100%',
+    padding: 20,
+    borderRadius: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 3,
+  },
+  iconCircleSmall: {
+    width: 50,
+    height: 50,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    borderRadius: 25,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  buttonTextGroup: {
+    flex: 1,
+  },
+  readerButtonText: {
+    color: 'white',
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  readerButtonSubtext: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 12,
+    marginTop: 2,
+  },
+
+  // Tertiary button — Debug Vision
   debugButton: {
     backgroundColor: '#1C1C1E',
     width: '100%',
@@ -159,9 +213,7 @@ const styles = StyleSheet.create({
   },
   debugIcon: {
     fontSize: 28,
-  },
-  debugTextGroup: {
-    flex: 1,
+    marginLeft: 10,
   },
   debugButtonText: {
     color: 'white', 
