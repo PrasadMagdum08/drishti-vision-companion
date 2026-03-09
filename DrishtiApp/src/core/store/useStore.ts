@@ -1,18 +1,25 @@
 import { create } from "zustand";
 
+export type ReaderMode = "auto" | "manual" | null;
+
 interface DrishtiState {
   socket: WebSocket | null;
   isConnected: boolean;
   lastAlert: string;
-  lastMessageType: string;
-  lastMessagePriority: boolean;
-  lastMessageFast: boolean;
+  lastMessageType: string | null;
+  lastMessagePriority: boolean | null;
+  lastMessageFast: boolean | null;
+
+  // ✅ New Reader State
+  readerMode: ReaderMode;
+  setReaderMode: (mode: ReaderMode) => void;
+
   connect: () => void;
   sendFrame: (base64Frame: string) => void;
-  sendRaw: (message: string) => void;
+  sendRaw: (jsonString: string) => void;
 }
 
-const WS_URL = "ws://192.168.16.125:8000/ws/vision/stream/";
+const WS_URL = "ws://192.168.193.125:8000/ws/vision/stream/";
 const BASE_DELAY_MS = 2000;
 const MAX_DELAY_MS = 15000;
 const MAX_ATTEMPTS = 10;
@@ -21,9 +28,12 @@ export const useStore = create<DrishtiState>((set, get) => ({
   socket: null,
   isConnected: false,
   lastAlert: "",
-  lastMessageType: "",
-  lastMessagePriority: false,
-  lastMessageFast: false,
+  lastMessageType: null,
+  lastMessagePriority: null,
+  lastMessageFast: null,
+  readerMode: null,
+
+  setReaderMode: (mode) => set({ readerMode: mode }),
 
   connect: () => {
     let attempt = 0;
@@ -54,19 +64,35 @@ export const useStore = create<DrishtiState>((set, get) => ({
 
       ws.onerror = (e) => console.error("❌ Error:", e);
 
-      ws.onmessage = (event) => {
+      ws.onmessage = async (event) => {
         try {
           const data = JSON.parse(event.data);
-          const messageText = data.text || data.alert || "";
-          const messageType = data.type || "";
-          const messagePriority = data.priority === true;
-          const messageFast = data.fast === true;
-          if (messageText) {
+          const msgType = data.type;
+
+          // ✅ Intercept Nav Commands
+          if (msgType === "nav_command" && data.text) {
+            const navHandler = (global as any).__drishtiNavHandler;
+            if (navHandler) {
+              const handled = await navHandler(data.text);
+              if (handled) return; 
+            }
+            // If not a nav command, fall through as a description
             set({
-              lastAlert: messageText,
-              lastMessageType: messageType,
-              lastMessagePriority: messagePriority,
-              lastMessageFast: messageFast,
+              lastAlert: data.text,
+              lastMessageType: "description",
+              lastMessagePriority: false,
+              lastMessageFast: false,
+            });
+            return;
+          }
+
+          const messageToSpeak = data.text || data.alert || "";
+          if (messageToSpeak) {
+            set({
+              lastAlert: messageToSpeak,
+              lastMessageType: msgType,
+              lastMessagePriority: data.priority ?? false,
+              lastMessageFast: data.fast ?? false,
             });
           }
         } catch (e) {
@@ -86,9 +112,9 @@ export const useStore = create<DrishtiState>((set, get) => ({
     socket.send(JSON.stringify({ type: "video_frame", data: payload }));
   },
 
-  sendRaw: (message: string) => {
+  sendRaw: (jsonString: string) => {
     const { socket, isConnected } = get();
     if (!socket || !isConnected) return;
-    socket.send(message);
+    socket.send(jsonString);
   },
 }));
