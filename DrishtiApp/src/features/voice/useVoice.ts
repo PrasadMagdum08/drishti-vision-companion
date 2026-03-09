@@ -1,18 +1,5 @@
-/**
- * useVoice.ts
- * Voice recording with automatic silence detection.
- *
- * Flow:
- *   1. Wake word fires → startListening() called
- *   2. expo-av records audio
- *   3. Silence detector polls audio level every 300ms
- *   4. If silent for SILENCE_THRESHOLD_MS → auto-stops and sends
- *   5. Safety timeout: auto-stops after MAX_RECORDING_MS regardless
- *
- * Tap-to-stop is preserved as fallback (called from CameraStream).
- */
-
 import { useState, useRef, useCallback } from "react";
+import { Vibration } from "react-native"; // ✅ IMPORT ADDED
 import { Audio } from "expo-av";
 import RNFS from "react-native-fs";
 import Tts from "react-native-tts";
@@ -26,6 +13,33 @@ const MAX_RECORDING_MS = 10000;      // hard stop at 10s
 
 // Audio level below this = silence (-50dB is a reasonable threshold)
 const SILENCE_DB_THRESHOLD = -40;
+
+// ─── HELPER: STRICT TTS SEQUENCER ─────────────────────────────────────────────
+const speakAndWait = (text: string): Promise<void> => {
+  return new Promise((resolve) => {
+    Tts.stop(); // Instantly kill any ongoing Guardian/Reader speech
+
+    let isResolved = false;
+    const finish = () => {
+      if (isResolved) return;
+      isResolved = true;
+      Tts.removeEventListener("tts-finish", finish);
+      Tts.removeEventListener("tts-cancel", finish);
+      Tts.removeEventListener("tts-error", finish);
+      resolve();
+    };
+
+    // Listen for the end of the TTS phrase
+    Tts.addEventListener("tts-finish", finish);
+    Tts.addEventListener("tts-cancel", finish);
+    Tts.addEventListener("tts-error", finish);
+
+    Tts.speak(text);
+
+    // Failsafe: Force resolve after 2.5s if TTS engine hangs
+    setTimeout(finish, 2500); 
+  });
+};
 
 // ─── HOOK ─────────────────────────────────────────────────────────────────────
 export const useVoice = () => {
@@ -80,10 +94,14 @@ export const useVoice = () => {
     isStopping.current = true;
 
     _clearTimers();
-    setIsListening(false);
+    
+    // ✅ 1. IMMEDIATE AUDIO CUE: "Processing" + Double Vibration
+    Vibration.vibrate([0, 50, 100, 50]); 
+    Tts.speak("Processing.");
 
     const currentRecording = recordingRef.current;
     recordingRef.current = null;
+    setIsListening(false);
 
     try {
       await currentRecording.stopAndUnloadAsync();
@@ -99,10 +117,16 @@ export const useVoice = () => {
     if (isListening || recordingRef.current) return;
 
     try {
-      // Stop TTS immediately when wake word fires
-      Tts.stop();
+      setIsListening(true); // Tell UI we are starting
       isStopping.current = false;
 
+      // ✅ 1. STRICT SEQUENTIAL LOCK: Wait for TTS to finish speaking
+      await speakAndWait("Speak now.");
+
+      // ✅ 2. HAPTIC CUE: Sharp buzz physically confirms mic is hot
+      Vibration.vibrate(80);
+
+      // 3. Start hardware recording
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
         playsInSilentModeIOS: true,
@@ -110,17 +134,14 @@ export const useVoice = () => {
 
       const { recording } = await Audio.Recording.createAsync(
         Audio.RecordingOptionsPresets.LOW_QUALITY,
-        // Status update callback for silence detection
         (status) => {
           if (!status.isRecording) return;
 
           const elapsed = Date.now() - recordingStartTime.current;
           if (elapsed < MIN_RECORDING_MS) return;
 
-          // Check metering level for silence
           const db = status.metering ?? -160;
           if (db < SILENCE_DB_THRESHOLD) {
-            // Start silence timer if not already running
             if (!silenceTimerRef.current) {
               silenceTimerRef.current = setTimeout(() => {
                 console.log("🔇 Silence detected — auto-sending");
@@ -128,20 +149,18 @@ export const useVoice = () => {
               }, SILENCE_THRESHOLD_MS);
             }
           } else {
-            // Sound detected — reset silence timer
             if (silenceTimerRef.current) {
               clearTimeout(silenceTimerRef.current);
               silenceTimerRef.current = null;
             }
           }
         },
-        SILENCE_POLL_MS  // poll interval in ms
+        SILENCE_POLL_MS  
       );
 
       recordingRef.current = recording;
       recordingStartTime.current = Date.now();
-      setIsListening(true);
-      console.log("🎙️ Recording started");
+      console.log("🎙️ Recording started (Strict Lock Released)");
 
       // Safety: hard stop at MAX_RECORDING_MS
       maxTimerRef.current = setTimeout(() => {
