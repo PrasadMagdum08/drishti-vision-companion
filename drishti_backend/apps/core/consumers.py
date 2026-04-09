@@ -1,7 +1,7 @@
 """
-consumers.py — Drishti WebSocket Consumer v4.1
+consumers.py — Drishti WebSocket Consumer v4.2
 - Guardian module: YOLOv8 bounding boxes with 3.5s cooldown.
-- Reader module: Uses Florence-2 for both Manual and Auto continuous OCR.
+- Reader module: Contextual Summarization via Gemini/Florence-2.
 - Companion module: Face recognition.
 """
 
@@ -29,7 +29,6 @@ GUARDIAN_TOP_N       = 3
 TTS_SENTENCE_GAP     = 0.6    
 VOICE_MUTE_SECONDS   = 5      
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
 def _get_sector_from_box(box, frame_w: float) -> str:
     x1, y1, x2, y2 = box
     center_x = (x1 + x2) / 2
@@ -61,8 +60,6 @@ class VisionConsumer(AsyncWebsocketConsumer):
         self.voice_queue:          list[dict]          = []
 
         self.seen_text_buffer = []
-        self.awaiting_summary_yes = False
-        self.reader_cached_frame = None
         self.last_guardian_alert_time = 0
         self.last_reader_alert_time = 0
 
@@ -184,7 +181,7 @@ class VisionConsumer(AsyncWebsocketConsumer):
                 
                 # 3.5-second cooldown for standard alerts
                 if (now_t - self.last_guardian_alert_time < 3.5) and not is_urgent:
-                    return
+                    return 
                     
                 self.last_guardian_alert_time = now_t
                 top_alerts = alert_objects[:GUARDIAN_TOP_N]
@@ -202,8 +199,9 @@ class VisionConsumer(AsyncWebsocketConsumer):
                 print(f"Guardian error: {e}")
             return
 
-        # ─── 2. CONTINUOUS READER BYPASS ──────────────────────────────────────
-        if msg_type == "audio_command" and data.get("action") in ["read_text", "continuous_read"] and data.get("frame"):
+        # ─── 2. GESTURE BYPASS (No STT Required) ──────────────────────────────
+        # ✅ Added "describe" to bypass actions to catch double taps instantly
+        if msg_type == "audio_command" and data.get("action") in ["read_summary", "continuous_summary", "describe"] and data.get("frame"):
             frame_data = data.get("frame")
             action = data.get("action")
             
@@ -216,7 +214,7 @@ class VisionConsumer(AsyncWebsocketConsumer):
             )
             return
 
-        # ─── 3. VOICE PIPELINE ────────────────────────────────────────────────
+        # ─── 3. VOICE PIPELINE (Microphone -> STT -> Action) ──────────────────
         if msg_type == "audio_command":
             print("🎙️ Voice command received...")
             base64_audio = data.get("data")
@@ -228,21 +226,18 @@ class VisionConsumer(AsyncWebsocketConsumer):
                     tmp.write(base64.b64decode(base64_audio))
                     tmp_path = tmp.name
 
-                # ✅ FINAL IMPROVEMENTS: Contextual Bias + Noise Filtering
                 result = await asyncio.to_thread(
                     stt_model.transcribe, 
                     tmp_path,
                     fp16=torch.cuda.is_available(),
-                    # 🎯 Contextual Bias: This prevents hallucinations by biasing Whisper's dictionary
                     initial_prompt="Drishti, read, text, auto, manual, describe, stop, summarize.",
                     compression_ratio_threshold=2.4, 
-                    no_speech_threshold=0.6          
+                    no_speech_threshold=0.6         
                 )
                 
                 user_text = result["text"].strip().lower()
                 os.remove(tmp_path)
 
-                # Filter hallucinations (Whisper hearing static as words like "You" or "Thank you")
                 if len(user_text.split()) < 1 or len(user_text) < 2:
                     return
 
@@ -252,31 +247,13 @@ class VisionConsumer(AsyncWebsocketConsumer):
                 print(f"STT error: {e}")
                 return
 
-            # Inform frontend of the recognized command
             await self.send(text_data=json.dumps({
                 "type": "nav_command",
                 "text": user_text,
             }))
 
-            new_action = None
+            new_action = self.map_voice_to_action(user_text)
 
-            # Handle follow-up responses for Manual Mode
-            if self.awaiting_summary_yes:
-                if any(w in user_text for w in ["yes", "yeah", "sure", "read", "summarize", "do it", "please"]):
-                    new_action = "summarize_document"
-                elif any(w in user_text for w in ["no", "cancel", "stop", "don't", "nope"]):
-                    self.awaiting_summary_yes = False
-                    self.reader_cached_frame = None
-                    await self.send(text_data=json.dumps({"type": "description", "text": "Okay, cancelled.", "priority": True}))
-                    return
-                else:
-                    self.awaiting_summary_yes = False
-                    self.reader_cached_frame = None
-
-            if not new_action:
-                new_action = self.map_voice_to_action(user_text)
-
-            # Task Management: Queue or Cancel based on action type
             if self.current_voice_task and not self.current_voice_task.done():
                 if new_action == self.current_voice_action:
                     self.current_voice_task.cancel()
@@ -314,58 +291,47 @@ class VisionConsumer(AsyncWebsocketConsumer):
             if action == "ignore_navigation":
                 return
 
-            if not frame and action != "summarize_document":
+            if not frame:
                 await self.send(text_data=json.dumps({
                     "type": "description",
                     "text": "No camera frame yet. Please wait."
                 }))
                 return
 
-            # ── Auto Mode (Continuous Read) ──
-            if action == "continuous_read":
+            # ── Reader Mode: Context Summary ──
+            if action in ["read_summary", "continuous_summary"]:
                 now_t = time.time()
-                if now_t - getattr(self, "last_reader_alert_time", 0) < 3.5:
-                    return 
-                    
-                # Route through Florence-2 instead of EasyOCR
-                text_content = await asyncio.to_thread(hybrid_brain.ask_brain, frame, "read this text", True)
+                if action == "continuous_summary":
+                    if now_t - getattr(self, "last_reader_alert_time", 0) < 4.5:
+                        return 
                 
-                if text_content and "no clear text" not in text_content.lower():
-                    # Clean up the Florence prefix
-                    cleaned_text = text_content.replace("It says:", "").strip()
-                    
-                    if cleaned_text not in self.seen_text_buffer:
+                self.last_reader_alert_time = now_t
+                
+                if action == "read_summary":
+                    await self.send(text_data=json.dumps({"type": "description", "text": "Analyzing document..."}))
+
+                prompt = "Read the text in this image and provide a concise, meaningful summary of what it says. Do not read raw gibberish or formatting symbols."
+                text_content = await asyncio.to_thread(hybrid_brain.ask_brain, frame, prompt, True)
+                
+                cleaned_text = text_content.replace("It says:", "").strip()
+
+                if "no clear text" not in cleaned_text.lower():
+                    if action == "continuous_summary":
+                        if cleaned_text in self.seen_text_buffer:
+                            return
                         self.seen_text_buffer.append(cleaned_text)
-                        if len(self.seen_text_buffer) > 5: 
+                        if len(self.seen_text_buffer) > 3: 
                             self.seen_text_buffer.pop(0)
-                        
-                        await self.send(text_data=json.dumps({
-                            "type": "ocr_result", 
-                            "text": cleaned_text, 
-                            "priority": True
-                        }))
+
+                    await self.send(text_data=json.dumps({
+                        "type": "ocr_result", 
+                        "text": cleaned_text, 
+                        "priority": True
+                    }))
+                else:
+                    if action == "read_summary":
+                        await self.send(text_data=json.dumps({"type": "ocr_result", "text": "No text detected.", "priority": True}))
                 return
-
-            # ── Manual Mode: Document ID ──
-            elif action == "read_text":
-                await self.send(text_data=json.dumps({"type": "description", "text": "Analyzing document..."}))
-                self.reader_cached_frame = frame
-                self.awaiting_summary_yes = True
-                
-                prompt = "Identify the type of text or document in this image. Reply in exactly one short, simple sentence, and end exactly with the question: 'Do you want me to summarize it?'"
-                answer = await asyncio.to_thread(hybrid_brain.ask_brain, frame, prompt, True) 
-                await self.send(text_data=json.dumps({"type": "ocr_result", "text": answer, "priority": True}))
-
-            # ── Manual Mode: Summary ──
-            elif action == "summarize_document":
-                await self.send(text_data=json.dumps({"type": "description", "text": "Summarizing, please wait..."}))
-                self.awaiting_summary_yes = False
-                frame_to_use = self.reader_cached_frame or frame
-                
-                prompt = "Read and summarize the text in this image accurately. Do not read raw gibberish; focus on context and meaning."
-                answer = await asyncio.to_thread(hybrid_brain.ask_brain, frame_to_use, prompt, True)
-                await self.send(text_data=json.dumps({"type": "ocr_result", "text": answer, "priority": True}))
-                self.reader_cached_frame = None
 
             # ── Companion: Face Match ──
             elif action == "analyze_face":
@@ -434,8 +400,8 @@ class VisionConsumer(AsyncWebsocketConsumer):
 
         if any(w in t for w in ["who is", "who are", "recognize", "face"]):
             return "analyze_face"
-        if any(w in t for w in ["read", "what does it say", "sign", "label", "text", "written"]):
-            return "read_text"
+        if any(w in t for w in ["read", "what does it say", "sign", "label", "text", "written", "summarize", "document"]):
+            return "read_summary"
         if any(w in t for w in [
             "describe", "see", "look", "what is", "what's", "around",
             "in front", "ahead", "scene", "surroundings", "explain",

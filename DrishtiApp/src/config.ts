@@ -4,7 +4,7 @@
 // Phone and PC must be on the same WiFi network.
 // ============================================================
 
-const MACHINE_IP = "192.168.16.125";
+const MACHINE_IP = "192.168.66.125";
 
 export const WS_URL = `ws://${MACHINE_IP}:8000/ws/vision/stream/`;
 export const API_URL = `http://${MACHINE_IP}:8000/api`;

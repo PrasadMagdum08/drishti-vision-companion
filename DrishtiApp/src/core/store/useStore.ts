@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { WS_URL } from "../../config";
 
 export type ReaderMode = "auto" | "manual" | null;
 
@@ -19,7 +20,6 @@ interface DrishtiState {
   sendRaw: (jsonString: string) => void;
 }
 
-const WS_URL = "ws://192.168.193.125:8000/ws/vision/stream/";
 const BASE_DELAY_MS = 2000;
 const MAX_DELAY_MS = 15000;
 const MAX_ATTEMPTS = 10;
@@ -71,7 +71,7 @@ export const useStore = create<DrishtiState>((set, get) => ({
 
           // ✅ Intercept Nav Commands
           if (msgType === "nav_command" && data.text) {
-            const navHandler = (global as any).__drishtiNavHandler;
+            const navHandler = (globalThis as any).__drishtiNavHandler;
             if (navHandler) {
               const handled = await navHandler(data.text);
               if (handled) return; 

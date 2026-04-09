@@ -2,6 +2,7 @@ import os
 import torch
 from google import genai
 from google.genai import types
+from google.genai.errors import APIError
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor
 from PIL import Image
 import io
@@ -151,12 +152,22 @@ class VisionEngine:
                 print("═"*60 + "\n")
                 
                 return final_text
+            except APIError as e:
+                # Catch Gemini rate limits gracefully
+                if "429" in str(e):
+                    print(f"\n⚠️ Gemini API Rate Limit Reached! Falling back to Edge Models...\n")
+                else:
+                    print(f"\n⚠️ Gemini API Error ({e}) - Triggering Fallback...\n")
+                self._load_local_models_now()
             except Exception as e:
                 print(f"\n⚠️ Gemini failed ({e}) - Triggering Edge Expert Fallback Router...\n")
                 self._load_local_models_now()
 
+        # Fallback Check: If models are still pre-warming in background thread, don't crash
+        if self._local_models_loading:
+            return "Cloud models are busy and local models are still loading. Please wait a moment."
+
         user_lower = user_question.lower()
-        # Broader keyword list to catch messy transcriptions
         is_ocr_task = force_ocr or any(w in user_lower for w in [
             "read", "text", "sign", "label", "say", "summarize", "document", 
             "written", "words", "page", "letter", "alphabet", "book"
@@ -164,13 +175,13 @@ class VisionEngine:
 
         if is_ocr_task and self.fl_model and self.fl_processor:
             try:
+                # Florence-2 extract raw text (it does not summarize natively, but it's the best local OCR)
                 task_prompt = "<OCR>"
                 device = "cuda" if torch.cuda.is_available() else "cpu"
                 inputs = self.fl_processor(text=task_prompt, images=image, return_tensors="pt").to(
                     device, torch.float16 if device == "cuda" else torch.float32
                 )
 
-                # ✅ VRAM Optimization: Prevent OOM crashes during Auto Mode
                 with torch.no_grad():
                     generated_ids = self.fl_model.generate(
                         input_ids=inputs["input_ids"],
@@ -183,7 +194,6 @@ class VisionEngine:
                 generated_text = self.fl_processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
                 parsed_answer = self.fl_processor.post_process_generation(generated_text, task=task_prompt, image_size=(image.width, image.height))
                 
-                # Instantly clear VRAM cache
                 if device == "cuda":
                     torch.cuda.empty_cache()
 
@@ -236,7 +246,7 @@ class VisionEngine:
                 print(f"Moondream failed: {e}")
                 return "I had trouble analyzing the scene locally."
 
-        return "I am offline and local models are still loading. Please wait a moment."
+        return "I am offline and local models are currently unavailable."
 
 # Singleton
 hybrid_brain = VisionEngine()
