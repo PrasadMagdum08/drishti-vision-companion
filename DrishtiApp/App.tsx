@@ -42,7 +42,7 @@ const AppInner = () => {
 
   // ✅ Expose navigator globally for useStore
   useEffect(() => {
-    (global as any).__drishtiNavHandler = handleNavAudio;
+    (globalThis as any).__drishtiNavHandler = handleNavAudio;
   }, [handleNavAudio]);
 
   return (

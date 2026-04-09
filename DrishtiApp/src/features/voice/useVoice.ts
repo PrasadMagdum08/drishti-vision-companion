@@ -1,24 +1,20 @@
 import { useState, useRef, useCallback } from "react";
-import { Vibration } from "react-native"; // ✅ IMPORT ADDED
+import { Vibration } from "react-native";
 import { Audio } from "expo-av";
 import RNFS from "react-native-fs";
 import Tts from "react-native-tts";
 import { useStore } from "../../core/store/useStore";
+import { WakeWordController } from "./useWakeWord";
 
-// ─── CONFIG ───────────────────────────────────────────────────────────────────
-const SILENCE_THRESHOLD_MS = 1800;   // stop after 1.8s of silence
-const SILENCE_POLL_MS = 300;         // check audio level every 300ms
-const MIN_RECORDING_MS = 1000;       // don't stop before 1s (catches short commands)
-const MAX_RECORDING_MS = 10000;      // hard stop at 10s
-
-// Audio level below this = silence (-50dB is a reasonable threshold)
+const SILENCE_THRESHOLD_MS = 1800;   
+const SILENCE_POLL_MS = 300;         
+const MIN_RECORDING_MS = 1000;       
+const MAX_RECORDING_MS = 10000;      
 const SILENCE_DB_THRESHOLD = -40;
 
-// ─── HELPER: STRICT TTS SEQUENCER ─────────────────────────────────────────────
 const speakAndWait = (text: string): Promise<void> => {
   return new Promise((resolve) => {
-    Tts.stop(); // Instantly kill any ongoing Guardian/Reader speech
-
+    Tts.stop(); 
     let isResolved = false;
     const finish = () => {
       if (isResolved) return;
@@ -29,35 +25,28 @@ const speakAndWait = (text: string): Promise<void> => {
       resolve();
     };
 
-    // Listen for the end of the TTS phrase
     Tts.addEventListener("tts-finish", finish);
     Tts.addEventListener("tts-cancel", finish);
     Tts.addEventListener("tts-error", finish);
 
     Tts.speak(text);
-
-    // Failsafe: Force resolve after 2.5s if TTS engine hangs
     setTimeout(finish, 2500); 
   });
 };
 
-// ─── HOOK ─────────────────────────────────────────────────────────────────────
 export const useVoice = () => {
   const [isListening, setIsListening] = useState(false);
   const recordingRef = useRef<Audio.Recording | null>(null);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const maxTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const recordingStartTime = useRef<number>(0);
   const isStopping = useRef(false);
 
   const _clearTimers = useCallback(() => {
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     if (maxTimerRef.current) clearTimeout(maxTimerRef.current);
-    if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
     silenceTimerRef.current = null;
     maxTimerRef.current = null;
-    pollIntervalRef.current = null;
   }, []);
 
   const _sendAudio = useCallback(async (recording: Audio.Recording) => {
@@ -79,10 +68,7 @@ export const useVoice = () => {
       if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(audioMessage);
         console.log("📤 Audio packet sent");
-      } else {
-        console.error("❌ Socket not open — audio dropped");
       }
-
       await RNFS.unlink(uri.replace("file://", "")).catch(() => {});
     } catch (e) {
       console.error("Send audio error:", e);
@@ -95,7 +81,6 @@ export const useVoice = () => {
 
     _clearTimers();
     
-    // ✅ 1. IMMEDIATE AUDIO CUE: "Processing" + Double Vibration
     Vibration.vibrate([0, 50, 100, 50]); 
     Tts.speak("Processing.");
 
@@ -106,10 +91,22 @@ export const useVoice = () => {
     try {
       await currentRecording.stopAndUnloadAsync();
       await _sendAudio(currentRecording);
+      
+      // ✅ Release Expo's grip on the audio system
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: true,
+        shouldDuckAndroid: false,
+        playThroughEarpieceAndroid: false,
+      });
+
     } catch (e) {
       console.error("Stop recording error:", e);
     } finally {
       isStopping.current = false;
+      // ✅ Trigger resume controller (which has a built-in 500ms delay)
+      WakeWordController.resume();
     }
   }, [_clearTimers, _sendAudio]);
 
@@ -117,19 +114,34 @@ export const useVoice = () => {
     if (isListening || recordingRef.current) return;
 
     try {
-      setIsListening(true); // Tell UI we are starting
+      setIsListening(true); 
       isStopping.current = false;
 
-      // ✅ 1. STRICT SEQUENTIAL LOCK: Wait for TTS to finish speaking
-      await speakAndWait("Speak now.");
+      // ✅ 1. Kill Porcupine immediately
+      await WakeWordController.pause();
 
-      // ✅ 2. HAPTIC CUE: Sharp buzz physically confirms mic is hot
+      const perm = await Audio.requestPermissionsAsync();
+      if (perm.status !== 'granted') {
+          console.error("Microphone permission denied");
+          setIsListening(false);
+          WakeWordController.resume();
+          return;
+      }
+
+      await speakAndWait("Speak now.");
+      
+      // ✅ 2. Hardware buffer before Expo claims the mic
+      await new Promise(resolve => setTimeout(resolve, 400));
+      
       Vibration.vibrate(80);
 
-      // 3. Start hardware recording
+      // ✅ 3. Claim audio focus smoothly
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
         playsInSilentModeIOS: true,
+        staysActiveInBackground: true,
+        shouldDuckAndroid: true,
+        playThroughEarpieceAndroid: false,
       });
 
       const { recording } = await Audio.Recording.createAsync(
@@ -160,11 +172,10 @@ export const useVoice = () => {
 
       recordingRef.current = recording;
       recordingStartTime.current = Date.now();
-      console.log("🎙️ Recording started (Strict Lock Released)");
+      console.log("🎙️ Recording started");
 
-      // Safety: hard stop at MAX_RECORDING_MS
       maxTimerRef.current = setTimeout(() => {
-        console.log("⏱️ Max recording time reached — auto-sending");
+        console.log("⏱️ Max recording time reached");
         stopListening();
       }, MAX_RECORDING_MS);
 
@@ -173,6 +184,7 @@ export const useVoice = () => {
       setIsListening(false);
       recordingRef.current = null;
       isStopping.current = false;
+      WakeWordController.resume(); 
     }
   }, [isListening, stopListening]);
 

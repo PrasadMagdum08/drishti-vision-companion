@@ -8,8 +8,7 @@ import { useStore, ReaderMode } from "../../core/store/useStore";
 import { useVoice } from "../voice/useVoice";
 import { useWakeWord } from "../voice/useWakeWord";
 
-const AUTO_INTERVAL_MS = 2000; 
-const MANUAL_HEARTBEAT_MS = 1000; 
+const AUTO_INTERVAL_MS = 2500; // Slightly increased to allow summary reading
 const FRAME_QUALITY = 60; 
 
 const ReaderScreen = () => {
@@ -17,24 +16,25 @@ const ReaderScreen = () => {
   const camera = useRef<Camera>(null);
   const isFocused = useIsFocused(); 
 
-  const { isConnected, socket, lastAlert, lastMessageType, readerMode, setReaderMode, sendFrame } = useStore();
+  const { isConnected, socket, lastAlert, lastMessageType, readerMode, setReaderMode } = useStore();
   const { isListening, startListening, stopListening } = useVoice();
 
-  const [displayText, setDisplayText] = useState("Initializing Reader...");
+  const [displayText, setDisplayText] = useState("Tap once to summarize. Double-tap for Auto Mode.");
   const [currentMode, setCurrentMode] = useState<ReaderMode>(null);
   const [isScanning, setIsScanning] = useState(false);
-  const [isSpeakingState, setIsSpeakingState] = useState(false);
 
   const isSpeaking = useRef(false);
-  const modePromptDone = useRef(false);
   const pulseAnim = useRef(new Animated.Value(1)).current;
+  
+  // Gesture Trackers
+  const tapCount = useRef(0);
+  const tapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Cleanup: Stop all processes when leaving the screen
+  // Cleanup on unmount
   useEffect(() => {
     if (!isFocused) {
       setIsScanning(false);
       Tts.stop();
-      // Inform backend to ignore any remaining pending OCR tasks
       if (socket && isConnected) {
         socket.send(JSON.stringify({ type: "audio_command", action: "ignore_navigation" }));
       }
@@ -56,48 +56,28 @@ const ReaderScreen = () => {
 
   const speak = useCallback((text: string) => {
     isSpeaking.current = true;
-    setIsSpeakingState(true);
     Tts.stop();
     Tts.speak(text);
   }, []);
 
   useEffect(() => {
-    const handler = () => {
-      isSpeaking.current = false;
-      setIsSpeakingState(false);
-      
-      const alert = useStore.getState().lastAlert;
-      if (alert && (alert.includes("summarize it?") || alert.includes("read on your command."))) {
-        startListening();
-      }
-    };
+    const handler = () => { isSpeaking.current = false; };
     Tts.addEventListener("tts-finish", handler);
     return () => Tts.removeEventListener("tts-finish", handler);
-  }, [startListening]);
+  }, []);
 
+  // Sync Global State
   useEffect(() => {
-    if (!modePromptDone.current) {
-      modePromptDone.current = true;
-      setReaderMode(null);
-      setTimeout(() => {
-        setDisplayText("Which mode do you want?");
-        speak("Reader mode. Say auto mode to read continuously, or manual mode to read on your command.");
-      }, 600);
-    }
-  }, [setReaderMode, speak]);
-
-  useEffect(() => {
-    if (readerMode && readerMode !== currentMode) {
+    if (readerMode !== currentMode) {
       setCurrentMode(readerMode);
       if (readerMode === "auto") {
         setDisplayText("Auto Mode: Panning...");
-      } else {
-        setDisplayText("Manual Mode: Say 'read this'");
+        speak("Auto mode started.");
       }
     }
-  }, [readerMode, currentMode]);
+  }, [readerMode, currentMode, speak]);
 
-  const captureAndSend = useCallback(async (actionType: "continuous_read" | "read_text") => {
+  const captureAndSend = useCallback(async (actionType: "continuous_summary" | "read_summary") => {
     if (!camera.current || !isConnected || !socket || !isFocused) return;
     try {
       setIsScanning(true);
@@ -119,48 +99,28 @@ const ReaderScreen = () => {
     let interval: ReturnType<typeof setInterval>;
     if (currentMode === "auto" && isConnected && isFocused) {
       interval = setInterval(() => {
-        if (!isSpeaking.current && !isListening) captureAndSend("continuous_read");
+        if (!isSpeaking.current && !isListening) captureAndSend("continuous_summary");
       }, AUTO_INTERVAL_MS);
     }
     return () => clearInterval(interval);
   }, [currentMode, isConnected, isFocused, isListening, captureAndSend]);
 
-  // Manual Mode Heartbeat (Background buffer keep-alive)
-  useEffect(() => {
-    let interval: ReturnType<typeof setInterval>;
-    if (isFocused && isConnected && currentMode === "manual" && !isListening) {
-      let isProcessing = false;
-      interval = setInterval(async () => {
-        if (!camera.current || isProcessing || !isFocused) return;
-        isProcessing = true;
-        try {
-          const photo = await camera.current.takeSnapshot({ quality: 30 }); 
-          if (photo?.path) {
-            const base64 = await RNFS.readFile(photo.path, "base64");
-            sendFrame(base64); 
-            await RNFS.unlink(photo.path).catch(() => {});
-          }
-        } catch (e) {
-        } finally {
-          isProcessing = false;
-        }
-      }, MANUAL_HEARTBEAT_MS); 
-    }
-    return () => clearInterval(interval);
-  }, [isFocused, isConnected, currentMode, isListening, sendFrame]);
-
-  // Handle incoming messages and navigation interrupts
+  // Intercept backend text
   useEffect(() => {
     if (!isFocused) return;
 
     if (lastMessageType === "nav_command") {
       const text = lastAlert?.toLowerCase() || "";
-      // If we are navigating away, kill the mode instantly
-      if (text.includes("stop") || text.includes("manual") || text.includes("guardian") || text.includes("go back")) {
-        setCurrentMode("manual");
-        setReaderMode("manual");
+      if (text.includes("stop") || text.includes("guardian") || text.includes("go back")) {
+        setCurrentMode(null);
+        setReaderMode(null);
         Tts.stop();
         setDisplayText("Stopping reader...");
+        return;
+      }
+      if (text.includes("auto mode")) {
+        setCurrentMode("auto");
+        setReaderMode("auto");
         return;
       }
     }
@@ -173,29 +133,52 @@ const ReaderScreen = () => {
 
   const handleWakeWord = useCallback(() => {
     if (isListening || !isFocused) return;
-    
-    if (currentMode === "auto") {
-      Vibration.vibrate(80);
-      speak("Scanning.");
-      setTimeout(() => captureAndSend("continuous_read"), 600);
-    } else {
-      startListening();
-    }
-  }, [isListening, currentMode, isFocused, startListening, captureAndSend, speak]);
+    startListening();
+  }, [isListening, isFocused, startListening]);
 
-  useWakeWord(handleWakeWord, isSpeakingState);
+  useWakeWord(handleWakeWord, false);
 
+  // ✅ NEW: Intuitive Gesture Logic
   const handleTap = useCallback(() => {
     if (isListening) { stopListening(); return; }
     
-    if (currentMode === "auto") {
-      Vibration.vibrate(80);
-      speak("Scanning.");
-      setTimeout(() => captureAndSend("continuous_read"), 600);
-    } else {
-      startListening();
-    }
-  }, [isListening, currentMode, startListening, captureAndSend, stopListening, speak]);
+    tapCount.current += 1;
+    if (tapTimer.current) clearTimeout(tapTimer.current);
+
+    tapTimer.current = setTimeout(() => {
+      const taps = tapCount.current;
+      tapCount.current = 0;
+
+      if (taps === 1) {
+        // Single Tap -> Context Summary Snapshot
+        if (currentMode === "auto") {
+           setCurrentMode(null);
+           setReaderMode(null);
+           setDisplayText("Auto mode stopped.");
+           speak("Stopped.");
+        } else {
+           Vibration.vibrate(50);
+           setDisplayText("Capturing for summary...");
+           speak("Capturing.");
+           captureAndSend("read_summary");
+        }
+      } else if (taps >= 2) {
+        // Double Tap -> Toggle Auto Mode
+        if (currentMode === "auto") {
+           setCurrentMode(null);
+           setReaderMode(null);
+           setDisplayText("Auto mode stopped.");
+           speak("Stopped.");
+        } else {
+           setCurrentMode("auto");
+           setReaderMode("auto");
+           Vibration.vibrate([0, 50, 100, 50]);
+           setDisplayText("Auto Mode: Panning...");
+           speak("Auto mode started.");
+        }
+      }
+    }, 300); // 300ms window to catch double taps
+  }, [isListening, stopListening, currentMode, captureAndSend, speak, setReaderMode]);
 
   if (!device) return <View style={styles.container}><Text style={styles.errorText}>No Camera</Text></View>;
 

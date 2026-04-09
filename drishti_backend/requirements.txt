@@ -4,7 +4,7 @@ daphne
 djangorestframework 
 django-cors-headers 
 numpy 
-opencv-python 
+opencv-contrib-python
 pillow 
 psycopg2-binary 
 redis 
@@ -13,6 +13,7 @@ pgvector
 ultralytics
 websockets
 transformers
+timm
 easyocr
 deepface
 tf-keras
@@ -23,7 +24,7 @@ openai-whisper
 pvporcupine
 SpeechRecognition 
 PyAudio
-google-generativeai
+google-genai
 accelerate
 einops
 torchvision
