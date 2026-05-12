@@ -35,7 +35,7 @@ The system is organized into specialized modules coordinated by `apps/core/consu
 ### Backend (Python/Django)
 - **Framework**: Django 6.0, Django Channels (WebSockets), DRF.
 - **AI Models**: 
-    - **Vision**: YOLOv8s, EasyOCR, Moondream2, Florence-2, Gemini 2.0 Flash.
+    - **Vision**: YOLOv8s, EasyOCR, Moondream2, Florence-2, Gemini 2.5 Flash.
     - **Speech**: OpenAI Whisper (STT) for processing audio commands.
 - **Database**: PostgreSQL with `pgvector` for memory and embeddings.
 - **Real-Time**: Daphne (ASGI server), In-Memory/Redis Channel Layers.
@@ -70,13 +70,12 @@ The system is organized into specialized modules coordinated by `apps/core/consu
    cd DrishtiApp
    npm install
    ```
-2. **Config**: Update `MACHINE_IP` in `src/config.ts`. **Convention**: Always import `WS_URL` and `API_URL` from `config.ts` in other files (e.g., `useStore.ts`).
+2. **Config**: Update `MACHINE_IP` in `src/config.ts`.
 3. **Run**: `npx expo start` (Use 'a' for Android, 'i' for iOS).
 
 ## Development Conventions
 
 - **Hybrid Failover**: AI logic should always prefer `hybrid_brain.ask_brain` to ensure offline resilience.
-- **Global Context**: Use `globalThis` instead of `global` for accessing cross-module handlers in the frontend.
 - **WebSocket Protocol**:
     - `video_frame`: Standard stream for Guardian.
     - `audio_command`: Voice-trigger or snapshots for high-level reasoning.
